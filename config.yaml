@@ -1,0 +1,103 @@
+# ── IBD Breakout Scanner Configuration ─────────────────────
+
+# ── Universe ──────────────────────────────
+universe:
+  source: "sp500"                    # sp500, nyse_nasdaq, custom
+  min_price: 10
+  min_avg_volume: 200000
+  min_market_cap: 500000000          # $500M
+
+# ── Data ──────────────────────────────────
+data:
+  history_years: 10
+  database_path: "data/ibd_scanner.db"
+  yfinance_batch_size: 50
+  yfinance_sleep_seconds: 1
+
+# ── Breakout Definition ───────────────────
+breakout:
+  min_gain_pct: 20                   # minimum % gain to count as success
+  max_loss_pct: 7                    # max % decline before counted as failure
+  outcome_window_weeks: 8            # how long to wait for outcome
+  min_breakout_volume_ratio: 1.4     # breakout volume vs 50-day avg
+
+# ── Pattern Detection ────────────────────
+patterns:
+  sensitivity: 0.5                   # 0.0 (strict) to 1.0 (loose)
+
+  cup_with_handle:
+    enabled: true
+    min_depth_pct: 12
+    max_depth_pct: 35
+    min_duration_weeks: 7
+    max_duration_weeks: 65
+    handle_max_depth_pct: 15
+    handle_min_weeks: 1
+    handle_max_weeks: 4
+    roundness_min_weeks_in_bottom: 3
+
+  double_bottom:
+    enabled: true
+    min_depth_pct: 12
+    max_depth_pct: 35
+    min_duration_weeks: 7
+    second_low_tolerance_pct: 5      # how close second low must be to first
+
+  flat_base:
+    enabled: true
+    max_depth_pct: 15
+    min_duration_weeks: 5
+
+  ascending_base:
+    enabled: false                   # enable later
+    pullback_min_pct: 10
+    pullback_max_pct: 20
+    min_pullbacks: 3
+
+  high_tight_flag:
+    enabled: false                   # enable later
+    min_prior_gain_pct: 100
+    max_flag_depth_pct: 25
+
+# ── Feature Extraction ───────────────────
+features:
+  rs_benchmark: "^GSPC"             # S&P 500 for relative strength
+  moving_averages: [50, 200]
+  volume_avg_period: 50
+
+# ── ML Training ──────────────────────────
+training:
+  model_type: "hybrid"              # hybrid (CNN + tabular), cnn, lightgbm
+  walk_forward_test_years: 1
+  embargo_weeks: 8                  # Gap between train/test to prevent leakage
+  min_train_samples: 500
+  class_balance_method: "scale_pos_weight"  # scale_pos_weight, smote, none
+  hyperparam_trials: 100            # Optuna trials
+  random_seed: 42
+
+  lightgbm:
+    num_leaves_range: [20, 150]
+    learning_rate_range: [0.01, 0.3]
+    min_child_samples_range: [5, 50]
+
+  cnn:
+    lookback_days: 200
+    channels: ["close_norm", "volume_norm", "rs_line", "ma50_ratio", "ma200_ratio"]
+    epochs: 100
+    batch_size: 64
+    early_stopping_patience: 10
+    learning_rate: 0.001
+    weight_decay: 0.00001
+    gradient_clip: 1.0              # Max gradient norm (0 to disable)
+
+# ── Scanner ──────────────────────────────
+scanner:
+  min_confidence: 0.6
+  max_results: 50
+  output_format: "table"            # table, json, csv
+
+# ── Retraining ───────────────────────────
+retraining:
+  trigger_new_outcomes: 100         # retrain after N new outcomes
+  min_retrain_interval_days: 30
+  drift_threshold: 0.10             # retrain if hit rate drops > 10% vs backtest
