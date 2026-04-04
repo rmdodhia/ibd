@@ -23,8 +23,16 @@ def get_sp500_symbols() -> list[str]:
     Returns:
         List of ticker symbols.
     """
+    import requests
+    from io import StringIO
+
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    tables = pd.read_html(StringIO(response.text))
     df = tables[0]
     # Symbol column contains tickers, some have dots (BRK.B) that need conversion
     symbols = df["Symbol"].str.replace(".", "-", regex=False).tolist()

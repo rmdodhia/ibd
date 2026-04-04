@@ -287,7 +287,11 @@ def save_index_data_to_db(symbol: str, df: pd.DataFrame) -> int:
     """
     total_rows = 0
     df = df.reset_index()
-    df.columns = [c.lower().replace(" ", "_") for c in df.columns]
+
+    # Handle MultiIndex columns from yfinance
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+    df.columns = [str(c).lower().replace(" ", "_") for c in df.columns]
 
     with get_cursor() as cur:
         for _, row in df.iterrows():

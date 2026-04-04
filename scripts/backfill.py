@@ -48,23 +48,35 @@ def backfill(test_count: int = 0, skip_universe: bool = False) -> None:
     logger.info("Initializing database...")
     init_db()
 
-    # Refresh universe (or use existing)
-    if skip_universe:
-        logger.info("Using existing universe...")
-    else:
-        logger.info("Refreshing stock universe...")
-        count = refresh_universe()
-        logger.info("Universe contains %d stocks", count)
-
-    # Get symbols to process
-    symbols = get_universe()
-    if not symbols:
-        logger.error("No symbols in universe. Run refresh_universe first.")
-        return
-
+    # Test mode: use a small set of well-known stocks (skip slow universe refresh)
     if test_count > 0:
-        symbols = symbols[:test_count]
-        logger.info("Test mode: processing %d symbols", test_count)
+        test_symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "UNH",
+                        "JNJ", "XOM", "PG", "MA", "HD", "CVX", "MRK", "ABBV", "PEP", "KO"]
+        symbols = test_symbols[:test_count]
+        logger.info("Test mode: using %d test symbols: %s", len(symbols), symbols)
+
+        # Save test symbols to database
+        from scanner.db import get_cursor
+        with get_cursor() as cur:
+            for sym in symbols:
+                cur.execute(
+                    "INSERT OR IGNORE INTO stocks (symbol, last_updated) VALUES (?, date('now'))",
+                    (sym,)
+                )
+    else:
+        # Full mode: refresh entire universe
+        if skip_universe:
+            logger.info("Using existing universe...")
+        else:
+            logger.info("Refreshing stock universe...")
+            count = refresh_universe()
+            logger.info("Universe contains %d stocks", count)
+
+        # Get symbols to process
+        symbols = get_universe()
+        if not symbols:
+            logger.error("No symbols in universe. Run refresh_universe first.")
+            return
 
     # Find symbols that need data (resume capability)
     symbols_to_fetch = []
