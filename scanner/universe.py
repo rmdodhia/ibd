@@ -6,6 +6,7 @@ and maintain the universe list.
 
 import logging
 import time
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -18,25 +19,24 @@ logger = logging.getLogger(__name__)
 
 
 def get_sp500_symbols() -> list[str]:
-    """Fetch current S&P 500 constituents from Wikipedia.
+    """Load S&P 500 constituents from local CSV file.
+
+    The file lives at data/sp500_symbols.csv with columns: symbol,name.
+    To update the list, replace the CSV file manually or run:
+        python scripts/refresh_universe.py --update-csv
 
     Returns:
         List of ticker symbols.
     """
-    import requests
-    from io import StringIO
-
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    tables = pd.read_html(StringIO(response.text))
-    df = tables[0]
-    # Symbol column contains tickers, some have dots (BRK.B) that need conversion
-    symbols = df["Symbol"].str.replace(".", "-", regex=False).tolist()
-    logger.info("Fetched %d S&P 500 symbols", len(symbols))
+    csv_path = Path(__file__).parent.parent / "data" / "sp500_symbols.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"S&P 500 symbol list not found at {csv_path}. "
+            "Please ensure data/sp500_symbols.csv exists."
+        )
+    df = pd.read_csv(csv_path)
+    symbols = df["symbol"].tolist()
+    logger.info("Loaded %d S&P 500 symbols from %s", len(symbols), csv_path.name)
     return symbols
 
 
