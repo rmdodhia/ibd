@@ -1,15 +1,17 @@
 """Stock universe management.
 
-Pull S&P 500 symbols, apply filters (price, volume, market cap),
+Pull S&P 500, NYSE, and NASDAQ symbols, apply filters (price, volume, market cap),
 and maintain the universe list.
 """
 
 import logging
 import time
+from io import StringIO
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import requests
 import yfinance as yf
 
 from scanner.config import get
@@ -17,27 +19,95 @@ from scanner.db import get_cursor, init_db
 
 logger = logging.getLogger(__name__)
 
+# User agent for web requests
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
 
 def get_sp500_symbols() -> list[str]:
-    """Load S&P 500 constituents from local CSV file.
-
-    The file lives at data/sp500_symbols.csv with columns: symbol,name.
-    To update the list, replace the CSV file manually or run:
-        python scripts/refresh_universe.py --update-csv
+    """Fetch S&P 500 constituents from Wikipedia.
 
     Returns:
         List of ticker symbols.
     """
-    csv_path = Path(__file__).parent.parent / "data" / "sp500_symbols.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"S&P 500 symbol list not found at {csv_path}. "
-            "Please ensure data/sp500_symbols.csv exists."
-        )
-    df = pd.read_csv(csv_path)
-    symbols = df["symbol"].tolist()
-    logger.info("Loaded %d S&P 500 symbols from %s", len(symbols), csv_path.name)
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    headers = {"User-Agent": USER_AGENT}
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    tables = pd.read_html(StringIO(response.text))
+    df = tables[0]
+    # Symbol column contains tickers, some have dots (BRK.B) that need conversion
+    symbols = df["Symbol"].str.replace(".", "-", regex=False).tolist()
+    logger.info("Fetched %d S&P 500 symbols", len(symbols))
     return symbols
+
+
+def get_nasdaq_symbols() -> list[str]:
+    """Fetch NASDAQ-listed symbols from official NASDAQ trader site.
+
+    Returns:
+        List of ticker symbols.
+    """
+    url = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+    headers = {"User-Agent": USER_AGENT}
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+
+    # Parse pipe-delimited file
+    df = pd.read_csv(StringIO(response.text), sep="|")
+
+    # Filter out test symbols, file footer, and NaN values
+    df = df[df["Test Issue"] == "N"]
+    df = df[df["Symbol"].notna()]
+    df = df[~df["Symbol"].astype(str).str.contains("File Creation Time", na=False)]
+
+    symbols = df["Symbol"].tolist()
+    logger.info("Fetched %d NASDAQ symbols", len(symbols))
+    return symbols
+
+
+def get_nyse_symbols() -> list[str]:
+    """Fetch NYSE and other exchange symbols from official NASDAQ trader site.
+
+    This includes NYSE, NYSE American (AMEX), NYSE Arca, BATS, and IEX.
+
+    Returns:
+        List of ticker symbols.
+    """
+    url = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+    headers = {"User-Agent": USER_AGENT}
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+
+    # Parse pipe-delimited file
+    df = pd.read_csv(StringIO(response.text), sep="|")
+
+    # Filter out test symbols, file footer, and NaN values
+    df = df[df["Test Issue"] == "N"]
+    df = df[df["ACT Symbol"].notna()]
+    df = df[~df["ACT Symbol"].astype(str).str.contains("File Creation Time", na=False)]
+
+    # Convert symbols: replace dots with dashes for yfinance compatibility
+    symbols = df["ACT Symbol"].str.replace(".", "-", regex=False).tolist()
+    logger.info("Fetched %d NYSE/other exchange symbols", len(symbols))
+    return symbols
+
+
+def get_all_us_symbols() -> list[str]:
+    """Fetch all US stock symbols (NASDAQ + NYSE + other exchanges).
+
+    Returns:
+        Deduplicated list of ticker symbols.
+    """
+    nasdaq = get_nasdaq_symbols()
+    nyse = get_nyse_symbols()
+
+    # Combine and deduplicate
+    all_symbols = list(set(nasdaq + nyse))
+    all_symbols.sort()
+
+    logger.info("Combined %d unique US symbols (NASDAQ: %d, NYSE/other: %d)",
+                len(all_symbols), len(nasdaq), len(nyse))
+    return all_symbols
 
 
 def get_stock_info(symbols: list[str], batch_size: int = 50) -> list[dict]:
@@ -153,21 +223,36 @@ def get_universe() -> list[str]:
         return [row[0] for row in cur.fetchall()]
 
 
-def refresh_universe() -> int:
+def refresh_universe(source: Optional[str] = None) -> int:
     """Refresh the stock universe from scratch.
 
-    Pulls S&P 500 symbols, fetches info, filters, and saves to DB.
+    Args:
+        source: Override config source. Options: "sp500", "nasdaq", "nyse", "all".
+                If None, uses config value.
 
     Returns:
         Number of stocks in the refreshed universe.
     """
     init_db()
 
-    source = get("universe.source", "sp500")
-    if source != "sp500":
-        raise ValueError(f"Unknown universe source: {source}")
+    if source is None:
+        source = get("universe.source", "sp500")
 
-    symbols = get_sp500_symbols()
+    logger.info("Refreshing universe from source: %s", source)
+
+    if source == "sp500":
+        symbols = get_sp500_symbols()
+    elif source == "nasdaq":
+        symbols = get_nasdaq_symbols()
+    elif source == "nyse":
+        symbols = get_nyse_symbols()
+    elif source == "all":
+        symbols = get_all_us_symbols()
+    else:
+        raise ValueError(f"Unknown universe source: {source}. "
+                         "Options: sp500, nasdaq, nyse, all")
+
+    logger.info("Fetching info for %d symbols (this may take a while)...", len(symbols))
     stocks = get_stock_info(symbols)
     filtered = filter_universe(stocks)
     count = save_stocks_to_db(filtered)

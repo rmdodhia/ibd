@@ -2,7 +2,7 @@
 
 # ── Universe ──────────────────────────────
 universe:
-  source: "sp500"                    # sp500, nyse_nasdaq, custom
+  source: "sp500"                    # sp500, nasdaq, nyse, all (nasdaq+nyse)
   min_price: 10
   min_avg_volume: 200000
   min_market_cap: 500000000          # $500M

@@ -37,12 +37,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def backfill(test_count: int = 0, skip_universe: bool = False) -> None:
+def backfill(test_count: int = 0, skip_universe: bool = False, source: str = None) -> None:
     """Run the full backfill process.
 
     Args:
         test_count: If > 0, only process this many stocks (for testing).
         skip_universe: If True, don't refresh universe (use existing).
+        source: Universe source override (sp500, nasdaq, nyse, all).
     """
     # Initialize database
     logger.info("Initializing database...")
@@ -68,8 +69,8 @@ def backfill(test_count: int = 0, skip_universe: bool = False) -> None:
         if skip_universe:
             logger.info("Using existing universe...")
         else:
-            logger.info("Refreshing stock universe...")
-            count = refresh_universe()
+            logger.info("Refreshing stock universe (source: %s)...", source or "config default")
+            count = refresh_universe(source=source)
             logger.info("Universe contains %d stocks", count)
 
         # Get symbols to process
@@ -131,9 +132,16 @@ def main():
         action="store_true",
         help="Skip universe refresh, use existing stocks",
     )
+    parser.add_argument(
+        "--source",
+        type=str,
+        choices=["sp500", "nasdaq", "nyse", "all"],
+        default=None,
+        help="Universe source: sp500, nasdaq, nyse, or all (default: from config)",
+    )
     args = parser.parse_args()
 
-    backfill(test_count=args.test, skip_universe=args.skip_universe)
+    backfill(test_count=args.test, skip_universe=args.skip_universe, source=args.source)
 
 
 if __name__ == "__main__":
