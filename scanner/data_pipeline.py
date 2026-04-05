@@ -157,6 +157,8 @@ def save_ohlcv_to_db(data: dict[str, pd.DataFrame]) -> int:
 def fetch_fundamentals(symbols: list[str]) -> dict[str, list[dict]]:
     """Fetch quarterly fundamentals (EPS, revenue) for symbols.
 
+    Uses quarterly_income_stmt which provides Net Income and Total Revenue.
+
     Args:
         symbols: List of ticker symbols.
 
@@ -174,17 +176,51 @@ def fetch_fundamentals(symbols: list[str]) -> dict[str, list[dict]]:
         try:
             ticker = yf.Ticker(symbol)
 
-            # Quarterly earnings
-            earnings = ticker.quarterly_earnings
-            if earnings is not None and not earnings.empty:
-                quarters = []
-                for idx, row in earnings.iterrows():
-                    quarter_data = {
-                        "quarter_end": idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10],
-                        "eps": row.get("Earnings"),
-                        "revenue": row.get("Revenue"),
-                    }
-                    quarters.append(quarter_data)
+            # Get quarterly income statement (newer API)
+            income_stmt = ticker.quarterly_income_stmt
+            if income_stmt is None or income_stmt.empty:
+                continue
+
+            # Get shares outstanding for EPS calculation
+            shares = None
+            try:
+                info = ticker.info
+                shares = info.get("sharesOutstanding")
+            except Exception:
+                pass
+
+            quarters = []
+            # Columns are dates, rows are line items
+            for col in income_stmt.columns:
+                quarter_end = col.strftime("%Y-%m-%d") if hasattr(col, "strftime") else str(col)[:10]
+
+                # Extract Net Income and Total Revenue
+                net_income = None
+                revenue = None
+
+                if "Net Income" in income_stmt.index:
+                    val = income_stmt.loc["Net Income", col]
+                    if pd.notna(val):
+                        net_income = float(val)
+
+                if "Total Revenue" in income_stmt.index:
+                    val = income_stmt.loc["Total Revenue", col]
+                    if pd.notna(val):
+                        revenue = float(val)
+
+                # Calculate EPS if we have net income and shares
+                eps = None
+                if net_income is not None and shares:
+                    eps = net_income / shares
+
+                if net_income is not None or revenue is not None:
+                    quarters.append({
+                        "quarter_end": quarter_end,
+                        "eps": eps,
+                        "revenue": revenue,
+                    })
+
+            if quarters:
                 results[symbol] = quarters
 
         except Exception as e:
