@@ -1,10 +1,13 @@
 """Flat Base pattern detector.
 
-Detects sideways consolidation:
-1. Price range from high to low ≤ 15%
-2. Duration ≥ 5 weeks
-3. Pivot = high of base
-4. Tight weekly closes preferred
+IBD-style flat base requirements:
+1. Prior uptrend of 25%+ before the base
+2. Tight sideways consolidation: high-to-low range <= 15%
+3. Duration >= 5 weeks
+4. Tight weekly closes (low coefficient of variation)
+5. Pivot = high of base
+
+Flat bases are continuation patterns that form after a meaningful advance.
 """
 
 import logging
@@ -26,6 +29,16 @@ class FlatBaseDetector(BaseDetector):
         super().__init__()
         self.max_depth = get("patterns.flat_base.max_depth_pct", 15)
         self.min_duration_weeks = get("patterns.flat_base.min_duration_weeks", 5)
+
+        # Tightness as hard filter (not just confidence)
+        self.max_tightness_cv = get("patterns.flat_base.max_tightness_cv", 0.08)
+
+        # Prior uptrend
+        self.require_prior_uptrend = get(
+            "patterns.flat_base.require_prior_uptrend", True
+        )
+        self.min_prior_advance = get("patterns.prior_uptrend.min_advance_pct", 25)
+        self.prior_lookback_weeks = get("patterns.prior_uptrend.lookback_weeks", 26)
 
     def detect(self, symbol: str, df: pd.DataFrame) -> list[DetectedPattern]:
         """Scan for flat base patterns.
@@ -78,6 +91,19 @@ class FlatBaseDetector(BaseDetector):
         Returns:
             DetectedPattern if valid, None otherwise.
         """
+        # Check prior uptrend requirement first
+        if self.require_prior_uptrend:
+            has_uptrend, advance_pct = self.check_prior_uptrend(
+                df,
+                start_idx,
+                min_advance_pct=self.min_prior_advance,
+                lookback_weeks=self.prior_lookback_weeks,
+            )
+            if not has_uptrend:
+                return None
+        else:
+            advance_pct = 0.0
+
         # Try increasing window sizes to find the largest valid flat base
         best_pattern = None
         best_duration = 0
@@ -99,9 +125,18 @@ class FlatBaseDetector(BaseDetector):
             if range_pct <= self.max_depth:
                 duration_weeks = self.trading_days_to_weeks(window)
 
-                if duration_weeks >= self.min_duration_weeks and duration_weeks > best_duration:
-                    # Calculate tightness score
-                    tightness = self._compute_tightness(region)
+                # Calculate tightness score
+                tightness_cv = self._compute_tightness_cv(region)
+
+                # HARD FILTER: Reject if too loose
+                if tightness_cv > self.max_tightness_cv:
+                    continue
+
+                if (
+                    duration_weeks >= self.min_duration_weeks
+                    and duration_weeks > best_duration
+                ):
+                    tightness_score = self._cv_to_score(tightness_cv)
 
                     best_pattern = DetectedPattern(
                         symbol=symbol,
@@ -110,13 +145,17 @@ class FlatBaseDetector(BaseDetector):
                         base_end_date=self._date_to_str(region.iloc[-1]["date"]),
                         pivot_date=self._date_to_str(region.iloc[-1]["date"]),
                         pivot_price=float(high),
-                        confidence=self._compute_confidence(range_pct, duration_weeks, tightness),
+                        confidence=self._compute_confidence(
+                            range_pct, duration_weeks, tightness_score, advance_pct
+                        ),
                         metadata={
                             "depth_pct": float(range_pct),
                             "duration_weeks": float(duration_weeks),
                             "high": float(high),
                             "low": float(low),
-                            "tightness_score": float(tightness),
+                            "tightness_cv": float(tightness_cv),
+                            "tightness_score": float(tightness_score),
+                            "prior_advance_pct": float(advance_pct),
                         },
                     )
                     best_duration = duration_weeks
@@ -126,59 +165,75 @@ class FlatBaseDetector(BaseDetector):
 
         return best_pattern
 
-    def _compute_tightness(self, region: pd.DataFrame) -> float:
-        """Compute tightness score based on weekly close variations.
+    def _compute_tightness_cv(self, region: pd.DataFrame) -> float:
+        """Compute coefficient of variation of weekly closes.
 
-        Tighter closes = higher score (0-1).
+        Lower CV = tighter consolidation.
+        Returns CV as a decimal (e.g., 0.05 for 5%).
         """
         closes = region["close"].values
         if len(closes) < 5:
-            return 0.5
+            return 1.0  # Return high CV for insufficient data
 
         # Weekly closes (every 5 days)
         weekly_closes = closes[::5]
         if len(weekly_closes) < 2:
-            return 0.5
+            return 1.0
 
         # Calculate coefficient of variation
         mean_close = np.mean(weekly_closes)
         std_close = np.std(weekly_closes)
 
         if mean_close == 0:
-            return 0.5
+            return 1.0
 
-        cv = std_close / mean_close
+        return std_close / mean_close
 
-        # Convert to tightness score (lower CV = higher tightness)
-        # CV < 2% is very tight, CV > 10% is loose
-        tightness = max(0, min(1, 1 - (cv / 0.10)))
+    def _cv_to_score(self, cv: float) -> float:
+        """Convert CV to tightness score (0-1).
 
-        return tightness
+        Lower CV = higher score.
+        """
+        # CV < 2% is very tight (score ~0.8)
+        # CV > 8% is loose (score ~0)
+        return max(0, min(1, 1 - (cv / 0.10)))
 
     def _compute_confidence(
-        self, range_pct: float, duration_weeks: float, tightness: float
+        self,
+        range_pct: float,
+        duration_weeks: float,
+        tightness: float,
+        advance_pct: float,
     ) -> float:
         """Compute confidence score for the pattern (0-1)."""
         score = 0.5
 
         # Tighter range is better
         if range_pct < 10:
-            score += 0.2
+            score += 0.15
         elif range_pct < 15:
-            score += 0.1
+            score += 0.08
 
         # Longer duration is better (up to a point)
         if 5 <= duration_weeks <= 8:
-            score += 0.15
-        elif duration_weeks > 8:
             score += 0.1
+        elif duration_weeks > 8:
+            score += 0.05
 
         # High tightness is better
         score += tightness * 0.15
 
+        # Strong prior uptrend
+        if advance_pct >= 40:
+            score += 0.1
+        elif advance_pct >= 25:
+            score += 0.05
+
         return min(score, 1.0)
 
-    def _dedupe_patterns(self, patterns: list[DetectedPattern]) -> list[DetectedPattern]:
+    def _dedupe_patterns(
+        self, patterns: list[DetectedPattern]
+    ) -> list[DetectedPattern]:
         """Remove overlapping patterns, keeping the one with higher confidence."""
         if len(patterns) <= 1:
             return patterns

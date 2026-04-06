@@ -69,7 +69,7 @@ def classify_pattern(df, symbol: str, breakout_date: str) -> tuple[str, float, d
                 days_diff = abs(
                     (pd.to_datetime(p.base_end_date) - pd.to_datetime(breakout_date)).days
                 )
-                if days_diff <= 10 and p.confidence > best_confidence:
+                if days_diff <= 20 and p.confidence > best_confidence:
                     best_type = p.pattern_type
                     best_confidence = p.confidence
                     best_metadata = p.metadata

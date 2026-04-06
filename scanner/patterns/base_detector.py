@@ -133,3 +133,43 @@ class BaseDetector(ABC):
             return base_value * (1 + adjustment)
         else:
             return base_value * (1 - adjustment)
+
+    def check_prior_uptrend(
+        self,
+        df: pd.DataFrame,
+        base_start_idx: int,
+        min_advance_pct: float = 25.0,
+        lookback_weeks: int = 26,
+    ) -> tuple[bool, float]:
+        """Check if there was a sufficient prior uptrend before the base.
+
+        IBD bases should form after meaningful advances (typically 25-30%+).
+
+        Args:
+            df: Price DataFrame with 'close' column.
+            base_start_idx: Index where the base starts (left lip).
+            min_advance_pct: Minimum required advance percentage.
+            lookback_weeks: How many weeks to look back for the prior low.
+
+        Returns:
+            Tuple of (has_uptrend: bool, advance_pct: float).
+        """
+        lookback_days = lookback_weeks * 5
+        lookback_start = max(0, base_start_idx - lookback_days)
+
+        if lookback_start >= base_start_idx:
+            return False, 0.0
+
+        prior_region = df.iloc[lookback_start:base_start_idx]
+        if len(prior_region) < 10:
+            return False, 0.0
+
+        prior_low = prior_region["low"].min()
+        base_start_price = df.iloc[base_start_idx]["close"]
+
+        if prior_low <= 0:
+            return False, 0.0
+
+        advance_pct = ((base_start_price - prior_low) / prior_low) * 100
+
+        return advance_pct >= min_advance_pct, advance_pct

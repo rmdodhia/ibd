@@ -2,7 +2,7 @@
 
 # ── Universe ──────────────────────────────
 universe:
-  source: "sp500"                    # sp500, nasdaq, nyse, all (nasdaq+nyse)
+  source: "all"                    # sp500, nasdaq, nyse, all (nasdaq+nyse)
   min_price: 10
   min_avg_volume: 200000
   min_market_cap: 500000000          # $500M
@@ -16,37 +16,69 @@ data:
 
 # ── Breakout Definition ───────────────────
 breakout:
+  # Label mode for legacy 'outcome' column: "asymmetric" or "symmetric"
+  # Note: All 3 label variants are now computed regardless of this setting
+  label_mode: "asymmetric"           # asymmetric for legacy compatibility
+
+  # Asymmetric mode settings (original IBD)
   min_gain_pct: 20                   # minimum % gain to count as success
   max_loss_pct: 7                    # max % decline before counted as failure
-  outcome_window_weeks: 8            # how long to wait for outcome
+
+  # Symmetric mode settings
+  symmetric_threshold_pct: 10        # +/-10% for both success and failure
+
+  # Outcome window (increased from 8 to 12 weeks per critique)
+  outcome_window_weeks: 12           # how long to wait for outcome
   min_breakout_volume_ratio: 1.4     # breakout volume vs 50-day avg
 
 # ── Pattern Detection ────────────────────
 patterns:
   sensitivity: 0.5                   # 0.0 (strict) to 1.0 (loose)
 
+  # Shared: Prior uptrend requirement (IBD bases follow advances)
+  prior_uptrend:
+    enabled: true                    # Require prior uptrend for all patterns
+    min_advance_pct: 25              # Minimum 25% advance before base
+    lookback_weeks: 26               # Look back 6 months for the low
+
   cup_with_handle:
     enabled: true
-    min_depth_pct: 12
-    max_depth_pct: 35
+    min_depth_pct: 12                # IBD standard: 12-33% typical
+    max_depth_pct: 35                # Tightened from 40%
     min_duration_weeks: 7
     max_duration_weeks: 65
-    handle_max_depth_pct: 15
+    handle_max_depth_pct: 12         # Tightened from 15% (IBD: 10-12%)
     handle_min_weeks: 1
     handle_max_weeks: 4
-    roundness_min_weeks_in_bottom: 3
+    right_lip_upper_half: true       # Right lip must be in upper half of base
+    right_lip_min_recovery_pct: 50   # Min recovery from trough (upper half = 50%)
+    roundness_min_pct: 10            # Min % of days near trough (was hardcoded 5%)
+    roundness_min_symmetry: 0.25     # Min left/right symmetry (was hardcoded 0.15)
+    require_handle: false            # If true, cups without handles -> "cup_without_handle"
+
+  cup_without_handle:
+    enabled: true                    # Separate class for cups without handles
+    # Inherits cup_with_handle settings except handle requirements
 
   double_bottom:
     enabled: true
-    min_depth_pct: 12
-    max_depth_pct: 35
-    min_duration_weeks: 7
-    second_low_tolerance_pct: 5      # how close second low must be to first
+    min_depth_pct: 12                # IBD standard
+    max_depth_pct: 35                # Tightened from 40%
+    min_duration_weeks: 5
+    # Second low MUST undercut first (IBD requirement)
+    second_low_min_undercut_pct: 0.5 # Must go at least 0.5% below first low
+    second_low_max_undercut_pct: 5   # But no more than 5% below
+    # Mid-peak must be meaningful
+    mid_peak_min_rise_pct: 10        # Must rise 10% above both lows
+    min_weeks_between_lows: 2        # Minimum time between the two lows
 
   flat_base:
     enabled: true
     max_depth_pct: 15
     min_duration_weeks: 5
+    # Tightness as hard filter (not just confidence)
+    max_tightness_cv: 0.08           # Reject if CV > 8% (was only affecting confidence)
+    require_prior_uptrend: true      # Explicitly require prior uptrend
 
   ascending_base:
     enabled: false                   # enable later
@@ -75,6 +107,15 @@ training:
   hyperparam_trials: 100            # Optuna trials
   random_seed: 42
 
+  # Label strategy for training (select which outcome column to use)
+  # Options: "asym_20_7", "asym_15_10", "sym_10"
+  label_strategy: "asym_20_7"       # default to original IBD rules
+
+  # Focal loss settings (helps with imbalanced data)
+  use_focal_loss: false             # enable focal loss
+  focal_alpha: 0.75                 # weight for positive class
+  focal_gamma: 2.0                  # focus on hard examples
+
   lightgbm:
     num_leaves_range: [20, 150]
     learning_rate_range: [0.01, 0.3]
@@ -85,14 +126,24 @@ training:
     channels: ["close_norm", "volume_norm", "rs_line", "ma50_ratio", "ma200_ratio"]
     epochs: 100
     batch_size: 64
-    early_stopping_patience: 10
-    learning_rate: 0.001
-    weight_decay: 0.00001
+    early_stopping_patience: 15
+    learning_rate: 0.0001           # Reduced 10x to prevent overfitting
+    weight_decay: 0.001             # Increased 100x for regularization
     gradient_clip: 1.0              # Max gradient norm (0 to disable)
+
+# ── Quality Scoring ─────────────────────
+quality:
+  min_score: 0.5                     # Minimum quality score to flag pattern
+  min_technical_score: 0.3           # Minimum technical score
+  min_fundamental_score: 0.3         # Minimum fundamental score
+  min_prior_uptrend_pct: 30          # Minimum prior uptrend percentage
+  require_volume_confirmation: false # Require volume surge on breakout
+  require_rs_at_high: false          # Require RS line at new high
 
 # ── Scanner ──────────────────────────────
 scanner:
   min_confidence: 0.6
+  min_quality_score: 0.5             # Filter by quality score
   max_results: 50
   output_format: "table"            # table, json, csv
 
