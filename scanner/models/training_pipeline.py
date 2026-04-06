@@ -56,6 +56,67 @@ from scanner.models.hybrid_model import (
 logger = logging.getLogger(__name__)
 
 
+class FocalLoss(nn.Module):
+    """Focal Loss for imbalanced classification.
+
+    Focal loss down-weights easy examples and focuses on hard ones.
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    Args:
+        alpha: Weight for positive class. Default 0.75.
+        gamma: Focusing parameter. Higher values focus more on hard examples.
+               Default 2.0.
+        reduction: 'mean' or 'sum'. Default 'mean'.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.75,
+        gamma: float = 2.0,
+        reduction: str = "mean",
+    ):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute focal loss.
+
+        Args:
+            inputs: Logits (before sigmoid).
+            targets: Binary targets (0 or 1).
+
+        Returns:
+            Focal loss value.
+        """
+        # Apply sigmoid to get probabilities
+        p = torch.sigmoid(inputs)
+
+        # Compute cross entropy
+        ce_loss = nn.functional.binary_cross_entropy_with_logits(
+            inputs, targets, reduction="none"
+        )
+
+        # Compute p_t (probability of correct class)
+        p_t = p * targets + (1 - p) * (1 - targets)
+
+        # Compute alpha_t (class weight)
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+
+        # Compute focal weight
+        focal_weight = alpha_t * (1 - p_t) ** self.gamma
+
+        # Apply focal weight
+        loss = focal_weight * ce_loss
+
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        return loss
+
+
 def get_optimal_workers() -> int:
     """Get optimal number of DataLoader workers."""
     cpu_count = os.cpu_count() or 1
@@ -72,6 +133,8 @@ class TrainingPipeline:
     - Parallel data loading
     - Early stopping with patience
     - Learning rate scheduling
+    - Focal loss for imbalanced data
+    - Multi-label strategy support
     """
 
     def __init__(
@@ -80,6 +143,8 @@ class TrainingPipeline:
         device: Optional[str] = None,
         use_amp: bool = True,
         num_workers: Optional[int] = None,
+        label_strategy: Optional[str] = None,
+        use_focal_loss: Optional[bool] = None,
     ):
         """Initialize training pipeline.
 
@@ -88,8 +153,18 @@ class TrainingPipeline:
             device: Device to train on ('cpu', 'cuda', 'mps'). Auto-detected if None.
             use_amp: Use automatic mixed precision (faster on GPU).
             num_workers: DataLoader workers. Auto-detected if None.
+            label_strategy: Which outcome column to use ('asym_20_7', 'asym_15_10', 'sym_10').
+            use_focal_loss: Use focal loss instead of BCE. Defaults to config.
         """
         self.model_type = model_type
+        self.label_strategy = label_strategy or get("training.label_strategy", "asym_20_7")
+        self.use_focal_loss = use_focal_loss if use_focal_loss is not None else get("training.use_focal_loss", False)
+        self.focal_alpha = get("training.focal_alpha", 0.75)
+        self.focal_gamma = get("training.focal_gamma", 2.0)
+
+        logger.info("Label strategy: %s", self.label_strategy)
+        if self.use_focal_loss:
+            logger.info("Using Focal Loss (alpha=%.2f, gamma=%.2f)", self.focal_alpha, self.focal_gamma)
 
         # Auto-detect device
         if device is None:
@@ -150,9 +225,12 @@ class TrainingPipeline:
             version = datetime.now().strftime("v%Y%m%d_%H%M%S")
 
         logger.info("Starting training pipeline for version %s", version)
+        logger.info("Label strategy: %s, Focal loss: %s", self.label_strategy, self.use_focal_loss)
 
-        # Prepare dataset
-        price_series, tabular, labels, metadata_df = prepare_cnn_dataset()
+        # Prepare dataset with specified label strategy
+        price_series, tabular, labels, metadata_df = prepare_cnn_dataset(
+            label_strategy=self.label_strategy
+        )
         if len(labels) == 0:
             logger.error("No training data available")
             return {"error": "No data"}
@@ -247,6 +325,10 @@ class TrainingPipeline:
             "feature_names": get_feature_names(),
             "device": self.device,
             "use_amp": self.use_amp,
+            "label_strategy": self.label_strategy,
+            "use_focal_loss": self.use_focal_loss,
+            "focal_alpha": self.focal_alpha if self.use_focal_loss else None,
+            "focal_gamma": self.focal_gamma if self.use_focal_loss else None,
         }
 
         save_model(final_model, save_path, metadata)
@@ -307,9 +389,18 @@ class TrainingPipeline:
             device=self.device,
         )
 
-        # Class weight for imbalanced data
-        pos_weight = (y_train == 0).sum() / max((y_train == 1).sum(), 1)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(self.device))
+        # Select loss function
+        if self.use_focal_loss:
+            criterion = FocalLoss(
+                alpha=self.focal_alpha,
+                gamma=self.focal_gamma,
+            ).to(self.device)
+            logger.debug("Using Focal Loss (alpha=%.2f, gamma=%.2f)", self.focal_alpha, self.focal_gamma)
+        else:
+            # Class weight for imbalanced data
+            pos_weight = (y_train == 0).sum() / max((y_train == 1).sum(), 1)
+            criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(self.device))
+            logger.debug("Using BCEWithLogitsLoss (pos_weight=%.2f)", pos_weight)
 
         optimizer = optim.AdamW(
             model.parameters(),
@@ -510,6 +601,8 @@ def train_model(
     model_type: str = "hybrid",
     version: Optional[str] = None,
     save_path: Optional[str] = None,
+    label_strategy: Optional[str] = None,
+    use_focal_loss: Optional[bool] = None,
 ) -> dict:
     """Convenience function to train a model.
 
@@ -517,9 +610,15 @@ def train_model(
         model_type: Model type to train.
         version: Model version string.
         save_path: Path to save model.
+        label_strategy: Which outcome column to use ('asym_20_7', 'asym_15_10', 'sym_10').
+        use_focal_loss: Use focal loss instead of BCE.
 
     Returns:
         Training results dict.
     """
-    pipeline = TrainingPipeline(model_type=model_type)
+    pipeline = TrainingPipeline(
+        model_type=model_type,
+        label_strategy=label_strategy,
+        use_focal_loss=use_focal_loss,
+    )
     return pipeline.train(version=version, save_path=save_path)

@@ -68,6 +68,40 @@ def extract_pattern_features(
     else:
         tightness_score = 0.5
 
+    # Pre-breakout tightness: price range contraction in final 2-3 weeks
+    # IBD emphasizes this as a key signal - consolidation should tighten before breakout
+    final_weeks_days = min(15, len(pattern_df))  # Last 3 weeks
+    final_df = pattern_df.tail(final_weeks_days)
+
+    if len(final_df) >= 5:
+        # Calculate daily ranges in final period
+        final_ranges = final_df["high"].values - final_df["low"].values
+        final_range_avg = np.mean(final_ranges) if len(final_ranges) > 0 else 0
+
+        # Calculate daily ranges in earlier period
+        earlier_df = pattern_df.head(len(pattern_df) - final_weeks_days)
+        if len(earlier_df) >= 5:
+            earlier_ranges = earlier_df["high"].values - earlier_df["low"].values
+            earlier_range_avg = np.mean(earlier_ranges) if len(earlier_ranges) > 0 else 0
+
+            # Pre-breakout tightness ratio: lower = more contraction (better)
+            if earlier_range_avg > 0:
+                pre_breakout_tightness = final_range_avg / earlier_range_avg
+            else:
+                pre_breakout_tightness = 1.0
+        else:
+            pre_breakout_tightness = 1.0
+
+        # Also calculate as % of price (ATR-like)
+        avg_price = final_df["close"].mean()
+        if avg_price > 0:
+            pre_breakout_range_pct = (final_range_avg / avg_price) * 100
+        else:
+            pre_breakout_range_pct = 0.0
+    else:
+        pre_breakout_tightness = 1.0
+        pre_breakout_range_pct = 0.0
+
     # Support/resistance touches
     support_level = low_price * 1.02  # Within 2% of low
     resistance_level = high_price * 0.98  # Within 2% of high
@@ -81,6 +115,8 @@ def extract_pattern_features(
         "base_symmetry": float(base_symmetry),
         "handle_depth_pct": float(handle_depth_pct),
         "tightness_score": float(tightness_score),
+        "pre_breakout_tightness": float(pre_breakout_tightness),
+        "pre_breakout_range_pct": float(pre_breakout_range_pct),
         "support_touches": int(support_touches),
         "resistance_touches": int(resistance_touches),
     }
@@ -94,6 +130,8 @@ def _empty_features() -> dict:
         "base_symmetry": 0.5,
         "handle_depth_pct": 0.0,
         "tightness_score": 0.5,
+        "pre_breakout_tightness": 1.0,
+        "pre_breakout_range_pct": 0.0,
         "support_touches": 0,
         "resistance_touches": 0,
     }

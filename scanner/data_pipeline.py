@@ -229,6 +229,182 @@ def fetch_fundamentals(symbols: list[str]) -> dict[str, list[dict]]:
     return results
 
 
+def fetch_expanded_fundamentals(symbols: list[str]) -> dict[str, dict]:
+    """Fetch expanded fundamentals (valuation, profitability, debt) for symbols.
+
+    Gets snapshot data from yfinance info endpoint including:
+    - Valuation: P/E, PEG, P/B
+    - Profitability: ROE, ROA, margins
+    - Financial health: debt/equity, current ratio
+    - Market sentiment: short interest, analyst ratings
+
+    Args:
+        symbols: List of ticker symbols.
+
+    Returns:
+        Dict mapping symbol to dict of expanded fundamental data.
+    """
+    sleep_seconds = get("data.yfinance_sleep_seconds", 1)
+    results = {}
+
+    for i, symbol in enumerate(symbols):
+        if i > 0 and i % 50 == 0:
+            logger.info("Fetching expanded fundamentals: %d/%d", i, len(symbols))
+            time.sleep(sleep_seconds)
+
+        try:
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+
+            if not info:
+                continue
+
+            # Extract expanded fundamentals
+            data = {
+                # Valuation metrics
+                "pe_ratio": info.get("trailingPE") or info.get("forwardPE"),
+                "peg_ratio": info.get("pegRatio"),
+                "price_to_book": info.get("priceToBook"),
+
+                # Profitability metrics
+                "roe": info.get("returnOnEquity"),
+                "roa": info.get("returnOnAssets"),
+                "profit_margin": info.get("profitMargins"),
+                "operating_margin": info.get("operatingMargins"),
+                "gross_margin": info.get("grossMargins"),
+
+                # Financial health
+                "debt_to_equity": info.get("debtToEquity"),
+                "current_ratio": info.get("currentRatio"),
+                "quick_ratio": info.get("quickRatio"),
+                "free_cash_flow": info.get("freeCashflow"),
+
+                # Market sentiment
+                "short_percent": info.get("shortPercentOfFloat"),
+                "target_price": info.get("targetMeanPrice"),
+                "analyst_rating": _convert_analyst_rating(info.get("recommendationKey")),
+                "insider_pct": info.get("heldPercentInsiders"),
+            }
+
+            # Only store if we got some data
+            if any(v is not None for v in data.values()):
+                results[symbol] = data
+
+        except Exception as e:
+            logger.warning("Failed to fetch expanded fundamentals for %s: %s", symbol, e)
+
+    return results
+
+
+def _convert_analyst_rating(rating_key: Optional[str]) -> Optional[float]:
+    """Convert analyst rating key to numeric scale (1-5, 5=strong buy).
+
+    Args:
+        rating_key: String rating from yfinance (e.g., "buy", "hold", "sell").
+
+    Returns:
+        Numeric rating 1-5 or None if unknown.
+    """
+    if not rating_key:
+        return None
+
+    rating_map = {
+        "strongBuy": 5.0,
+        "buy": 4.0,
+        "hold": 3.0,
+        "underperform": 2.0,
+        "sell": 1.0,
+        "strongSell": 1.0,
+    }
+
+    # Handle case variations
+    key = rating_key.lower().replace("_", "").replace("-", "").replace(" ", "")
+    for k, v in rating_map.items():
+        if k.lower() in key or key in k.lower():
+            return v
+
+    return None
+
+
+def save_expanded_fundamentals_to_db(data: dict[str, dict]) -> int:
+    """Save expanded fundamentals to database.
+
+    Updates the most recent quarter for each symbol with the snapshot data.
+
+    Args:
+        data: Dict mapping symbol to expanded fundamental data.
+
+    Returns:
+        Number of rows updated.
+    """
+    total_rows = 0
+
+    with get_cursor() as cur:
+        for symbol, fundamentals in data.items():
+            # Find the most recent quarter for this symbol
+            cur.execute(
+                "SELECT quarter_end FROM fundamentals WHERE symbol = ? ORDER BY quarter_end DESC LIMIT 1",
+                (symbol,),
+            )
+            row = cur.fetchone()
+
+            if row:
+                quarter_end = row[0]
+            else:
+                # No existing quarter, skip (need quarterly data first)
+                continue
+
+            try:
+                cur.execute(
+                    """
+                    UPDATE fundamentals SET
+                        pe_ratio = ?,
+                        peg_ratio = ?,
+                        price_to_book = ?,
+                        roe = ?,
+                        roa = ?,
+                        profit_margin = ?,
+                        operating_margin = ?,
+                        gross_margin = ?,
+                        debt_to_equity = ?,
+                        current_ratio = ?,
+                        quick_ratio = ?,
+                        free_cash_flow = ?,
+                        short_percent = ?,
+                        target_price = ?,
+                        analyst_rating = ?,
+                        insider_pct = ?
+                    WHERE symbol = ? AND quarter_end = ?
+                    """,
+                    (
+                        fundamentals.get("pe_ratio"),
+                        fundamentals.get("peg_ratio"),
+                        fundamentals.get("price_to_book"),
+                        fundamentals.get("roe"),
+                        fundamentals.get("roa"),
+                        fundamentals.get("profit_margin"),
+                        fundamentals.get("operating_margin"),
+                        fundamentals.get("gross_margin"),
+                        fundamentals.get("debt_to_equity"),
+                        fundamentals.get("current_ratio"),
+                        fundamentals.get("quick_ratio"),
+                        fundamentals.get("free_cash_flow"),
+                        fundamentals.get("short_percent"),
+                        fundamentals.get("target_price"),
+                        fundamentals.get("analyst_rating"),
+                        fundamentals.get("insider_pct"),
+                        symbol,
+                        quarter_end,
+                    ),
+                )
+                total_rows += 1
+            except Exception as e:
+                logger.warning("Error saving expanded fundamentals for %s: %s", symbol, e)
+
+    logger.info("Updated %d rows with expanded fundamentals", total_rows)
+    return total_rows
+
+
 def save_fundamentals_to_db(data: dict[str, list[dict]]) -> int:
     """Save fundamentals data to database with YoY growth calculation.
 

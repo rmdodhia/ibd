@@ -37,10 +37,18 @@ class Breakout:
     consolidation_range_pct: float
     prior_high: float
     prior_high_date: str
+    # Legacy outcome (for backward compatibility)
     outcome: Optional[str] = None  # 'success', 'failure', 'pending'
     outcome_return_pct: Optional[float] = None
     max_gain_pct: Optional[float] = None
     max_loss_pct: Optional[float] = None
+    # Multi-label outcomes (for experimentation)
+    outcome_asym_20_7: Optional[str] = None   # +20%/-7% (original IBD)
+    outcome_asym_15_10: Optional[str] = None  # +15%/-10% (less extreme)
+    outcome_sym_10: Optional[str] = None      # +10%/-10% (symmetric)
+    return_asym_20_7: Optional[float] = None
+    return_asym_15_10: Optional[float] = None
+    return_sym_10: Optional[float] = None
 
 
 def detect_breakouts(
@@ -184,31 +192,100 @@ def _dedupe_breakouts(breakouts: list[Breakout], min_gap_days: int = 5) -> list[
     return result
 
 
+def _compute_outcome_for_thresholds(
+    future_df: pd.DataFrame,
+    breakout_price: float,
+    min_gain_pct: float,
+    max_loss_pct: float,
+    has_full_window: bool,
+) -> tuple[str, float]:
+    """Compute outcome for a specific gain/loss threshold pair.
+
+    Args:
+        future_df: DataFrame of prices after breakout.
+        breakout_price: Price at breakout.
+        min_gain_pct: Target gain percentage.
+        max_loss_pct: Stop loss percentage.
+        has_full_window: Whether full outcome window is available.
+
+    Returns:
+        Tuple of (outcome, return_pct).
+    """
+    hit_target = False
+    hit_stop = False
+
+    for _, row in future_df.iterrows():
+        day_gain = ((row["high"] - breakout_price) / breakout_price) * 100
+        day_loss = ((breakout_price - row["low"]) / breakout_price) * 100
+
+        if day_gain >= min_gain_pct and not hit_stop:
+            hit_target = True
+            break
+        if day_loss >= max_loss_pct:
+            hit_stop = True
+            break
+
+    if hit_target:
+        return "success", float(min_gain_pct)
+    elif hit_stop:
+        return "failure", float(-max_loss_pct)
+    elif not has_full_window:
+        final_price = future_df.iloc[-1]["close"]
+        final_return = ((final_price - breakout_price) / breakout_price) * 100
+        return "pending", float(final_return)
+    else:
+        # Didn't hit either threshold — use final price
+        final_price = future_df.iloc[-1]["close"]
+        final_return = ((final_price - breakout_price) / breakout_price) * 100
+
+        if final_return >= min_gain_pct * 0.5:
+            return "success", float(final_return)
+        elif final_return <= -max_loss_pct * 0.5:
+            return "failure", float(final_return)
+        else:
+            return "neutral", float(final_return)
+
+
 def label_breakout_outcomes(
     breakouts: list[Breakout],
     df: pd.DataFrame,
     min_gain_pct: float = 20.0,
     max_loss_pct: float = 7.0,
-    outcome_window_weeks: int = 8,
+    outcome_window_weeks: int = 12,
+    label_mode: str = None,
+    symmetric_threshold_pct: float = None,
 ) -> list[Breakout]:
     """Label breakout outcomes based on subsequent price action.
+
+    Computes ALL label variants in one pass:
+    - outcome_asym_20_7: Original IBD +20%/-7%
+    - outcome_asym_15_10: Less extreme +15%/-10%
+    - outcome_sym_10: Symmetric +10%/-10%
+
+    Also sets legacy 'outcome' field based on config's label_mode.
 
     Args:
         breakouts: List of Breakout objects to label.
         df: DataFrame with price data extending past breakout dates.
-        min_gain_pct: Minimum gain to count as success (default 20%).
-        max_loss_pct: Maximum loss before counted as failure (default 7%).
-        outcome_window_weeks: Weeks to track outcome (default 8).
+        min_gain_pct: Minimum gain for legacy outcome (default 20%).
+        max_loss_pct: Maximum loss for legacy outcome (default 7%).
+        outcome_window_weeks: Weeks to track outcome (default 12).
+        label_mode: "asymmetric" or "symmetric" for legacy outcome field.
+        symmetric_threshold_pct: Threshold for symmetric mode.
 
     Returns:
-        List of Breakout objects with outcome fields populated.
+        List of Breakout objects with all outcome fields populated.
     """
     # Load defaults from config
-    min_gain_pct = get("breakout.min_gain_pct", min_gain_pct)
-    max_loss_pct = get("breakout.max_loss_pct", max_loss_pct)
+    label_mode = label_mode or get("breakout.label_mode", "asymmetric")
+    symmetric_threshold_pct = symmetric_threshold_pct or get("breakout.symmetric_threshold_pct", 10.0)
     outcome_window_weeks = get("breakout.outcome_window_weeks", outcome_window_weeks)
-
     outcome_window_days = outcome_window_weeks * 5  # Trading days
+
+    logger.info(
+        "Computing all label variants with %d-week window",
+        outcome_window_weeks
+    )
 
     df = df.sort_values("date").reset_index(drop=True)
     df["date_str"] = df["date"].apply(
@@ -223,64 +300,61 @@ def label_breakout_outcomes(
 
         idx = breakout_idx[0]
         end_idx = min(idx + outcome_window_days, len(df))
+        has_full_window = end_idx == (idx + outcome_window_days)
 
         if idx >= len(df) - 1:
-            # Not enough future data
+            # Not enough future data - mark all as pending
             b.outcome = "pending"
+            b.outcome_asym_20_7 = "pending"
+            b.outcome_asym_15_10 = "pending"
+            b.outcome_sym_10 = "pending"
             labeled.append(b)
             continue
 
         future_df = df.iloc[idx + 1 : end_idx]
         if future_df.empty:
             b.outcome = "pending"
+            b.outcome_asym_20_7 = "pending"
+            b.outcome_asym_15_10 = "pending"
+            b.outcome_sym_10 = "pending"
             labeled.append(b)
             continue
 
-        # Calculate metrics
+        # Calculate max gain/loss metrics (shared across all strategies)
         max_high = future_df["high"].max()
         min_low = future_df["low"].min()
+        b.max_gain_pct = float(((max_high - b.breakout_price) / b.breakout_price) * 100)
+        b.max_loss_pct = float(((b.breakout_price - min_low) / b.breakout_price) * 100)
 
-        max_gain = ((max_high - b.breakout_price) / b.breakout_price) * 100
-        max_loss = ((b.breakout_price - min_low) / b.breakout_price) * 100
+        # Compute all 3 label variants
+        # Strategy 1: Original IBD (+20%/-7%)
+        outcome_1, return_1 = _compute_outcome_for_thresholds(
+            future_df, b.breakout_price, 20.0, 7.0, has_full_window
+        )
+        b.outcome_asym_20_7 = outcome_1
+        b.return_asym_20_7 = return_1
 
-        b.max_gain_pct = float(max_gain)
-        b.max_loss_pct = float(max_loss)
+        # Strategy 2: Less extreme (+15%/-10%)
+        outcome_2, return_2 = _compute_outcome_for_thresholds(
+            future_df, b.breakout_price, 15.0, 10.0, has_full_window
+        )
+        b.outcome_asym_15_10 = outcome_2
+        b.return_asym_15_10 = return_2
 
-        # Determine outcome
-        # Success: hit target gain before hitting stop loss
-        # Failure: hit stop loss first
-        hit_target = False
-        hit_stop = False
+        # Strategy 3: Symmetric (+10%/-10%)
+        outcome_3, return_3 = _compute_outcome_for_thresholds(
+            future_df, b.breakout_price, 10.0, 10.0, has_full_window
+        )
+        b.outcome_sym_10 = outcome_3
+        b.return_sym_10 = return_3
 
-        for _, row in future_df.iterrows():
-            day_gain = ((row["high"] - b.breakout_price) / b.breakout_price) * 100
-            day_loss = ((b.breakout_price - row["low"]) / b.breakout_price) * 100
-
-            if day_gain >= min_gain_pct and not hit_stop:
-                hit_target = True
-                break
-            if day_loss >= max_loss_pct:
-                hit_stop = True
-                break
-
-        if hit_target:
-            b.outcome = "success"
-            b.outcome_return_pct = float(min_gain_pct)
-        elif hit_stop:
-            b.outcome = "failure"
-            b.outcome_return_pct = float(-max_loss_pct)
+        # Set legacy outcome based on config's label_mode
+        if label_mode == "symmetric":
+            b.outcome = b.outcome_sym_10
+            b.outcome_return_pct = b.return_sym_10
         else:
-            # Didn't hit either threshold — use final price
-            final_price = future_df.iloc[-1]["close"]
-            final_return = ((final_price - b.breakout_price) / b.breakout_price) * 100
-            b.outcome_return_pct = float(final_return)
-
-            if final_return >= min_gain_pct * 0.5:  # 10%+ is partial success
-                b.outcome = "success"
-            elif final_return <= -max_loss_pct * 0.5:  # -3.5%+ is failure
-                b.outcome = "failure"
-            else:
-                b.outcome = "neutral"
+            b.outcome = b.outcome_asym_20_7
+            b.outcome_return_pct = b.return_asym_20_7
 
         labeled.append(b)
 

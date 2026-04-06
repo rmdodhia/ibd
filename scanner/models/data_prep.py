@@ -19,11 +19,15 @@ logger = logging.getLogger(__name__)
 
 def prepare_cnn_dataset(
     lookback_days: Optional[int] = None,
+    label_strategy: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
     """Prepare full dataset for CNN training.
 
     Args:
         lookback_days: Days of price history per sample. Defaults to config.
+        label_strategy: Which outcome column to use for labels.
+            Options: "asym_20_7", "asym_15_10", "sym_10"
+            Defaults to config setting.
 
     Returns:
         Tuple of (price_series, tabular_features, labels, metadata_df).
@@ -35,8 +39,13 @@ def prepare_cnn_dataset(
     if lookback_days is None:
         lookback_days = get("training.cnn.lookback_days", 200)
 
-    # Get labeled data
-    labeled_df = get_labeled_data()
+    if label_strategy is None:
+        label_strategy = get("training.label_strategy", "asym_20_7")
+
+    logger.info("Using label strategy: %s", label_strategy)
+
+    # Get labeled data with specified strategy
+    labeled_df = get_labeled_data(label_strategy=label_strategy)
     if labeled_df.empty:
         logger.error("No labeled data available. Run labeler first.")
         return np.array([]), np.array([]), np.array([]), pd.DataFrame()
@@ -96,7 +105,8 @@ def _prepare_single_sample(
     """
     symbol = row["symbol"]
     breakout_date = row["pivot_date"]
-    outcome = row["outcome"]
+    # Use outcome_for_training if available (set by get_labeled_data based on strategy)
+    outcome = row.get("outcome_for_training", row.get("outcome"))
 
     # Get price data
     stock_df = get_price_data(symbol)
@@ -165,8 +175,11 @@ def _extract_price_series(
 
     # 2. Normalized volume (by 50-day rolling avg)
     vol_avg = pd.Series(volume).rolling(50, min_periods=10).mean().fillna(volume[0]).values
+    # Avoid divide by zero - use 1.0 where vol_avg is zero
+    vol_avg = np.where(vol_avg > 0, vol_avg, 1.0)
     volume_norm = volume / vol_avg
     volume_norm = np.clip(volume_norm, 0, 5)  # Cap at 5x average
+    volume_norm = np.nan_to_num(volume_norm, nan=1.0, posinf=5.0, neginf=0.0)
 
     # 3. RS line (if index data available)
     if not index_df.empty and len(df) > 0:
@@ -186,28 +199,37 @@ def _extract_price_series(
 
         if "close_idx" in merged.columns and merged["close_idx"].notna().sum() > 0:
             merged["close_idx"] = merged["close_idx"].ffill().bfill()
-            rs = merged["close"].values / merged["close_idx"].values
+            idx_vals = np.where(merged["close_idx"].values > 0, merged["close_idx"].values, 1.0)
+            rs = merged["close"].values / idx_vals
             rs_line = rs / rs[0] if rs[0] > 0 else rs
         else:
             rs_line = np.ones(len(close))
     else:
         rs_line = np.ones(len(close))
+    rs_line = np.nan_to_num(rs_line, nan=1.0, posinf=1.0, neginf=1.0)
 
     # 4. MA50 ratio
     ma50 = pd.Series(close).rolling(50, min_periods=10).mean().fillna(close[0]).values
+    ma50 = np.where(ma50 > 0, ma50, 1.0)
     ma50_ratio = close / ma50
     ma50_ratio = np.clip(ma50_ratio, 0.5, 1.5)
+    ma50_ratio = np.nan_to_num(ma50_ratio, nan=1.0, posinf=1.5, neginf=0.5)
 
     # 5. MA200 ratio (use MA50 if not enough data)
     if len(close) >= 200:
         ma200 = pd.Series(close).rolling(200, min_periods=50).mean().fillna(close[0]).values
     else:
         ma200 = ma50  # Fallback
+    ma200 = np.where(ma200 > 0, ma200, 1.0)
     ma200_ratio = close / ma200
     ma200_ratio = np.clip(ma200_ratio, 0.5, 1.5)
+    ma200_ratio = np.nan_to_num(ma200_ratio, nan=1.0, posinf=1.5, neginf=0.5)
 
     # Stack channels
     series = np.stack([close_norm, volume_norm, rs_line, ma50_ratio, ma200_ratio], axis=1)
+
+    # Final NaN check
+    series = np.nan_to_num(series, nan=1.0, posinf=1.0, neginf=0.0)
 
     return series.astype(np.float32)
 
@@ -224,11 +246,14 @@ def _extract_tabular_features(row: pd.Series) -> np.ndarray:
         "base_symmetry",
         "handle_depth_pct",
         "tightness_score",
+        "pre_breakout_tightness",
+        "pre_breakout_range_pct",
         "breakout_volume_ratio",
         "volume_trend_in_base",
         "up_down_volume_ratio",
         "rs_line_slope_4wk",
         "rs_line_slope_12wk",
+        "rs_acceleration",
         "rs_rank_percentile",
         "eps_latest_yoy_growth",
         "eps_acceleration",
@@ -263,11 +288,14 @@ def get_feature_names() -> list[str]:
         "base_symmetry",
         "handle_depth_pct",
         "tightness_score",
+        "pre_breakout_tightness",
+        "pre_breakout_range_pct",
         "breakout_volume_ratio",
         "volume_trend_in_base",
         "up_down_volume_ratio",
         "rs_line_slope_4wk",
         "rs_line_slope_12wk",
+        "rs_acceleration",
         "rs_rank_percentile",
         "eps_latest_yoy_growth",
         "eps_acceleration",

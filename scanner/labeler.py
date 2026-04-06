@@ -36,6 +36,7 @@ from scanner.breakout_detector import (
 )
 from scanner.patterns import classify_pattern
 from scanner.features import extract_all_features
+from scanner.quality_score import compute_quality_score
 
 logging.basicConfig(
     level=logging.INFO,
@@ -283,6 +284,13 @@ def _classify_and_save_batch(
             breakout.outcome_return_pct,
             breakout.max_gain_pct,
             breakout.max_loss_pct,
+            # Multi-label outcomes
+            breakout.outcome_asym_20_7,
+            breakout.outcome_asym_15_10,
+            breakout.outcome_sym_10,
+            breakout.return_asym_20_7,
+            breakout.return_asym_15_10,
+            breakout.return_sym_10,
             "auto",
         ))
 
@@ -296,6 +304,29 @@ def _classify_and_save_batch(
             breakout_date=breakout.breakout_date,
             pattern_metadata=metadata,
         )
+
+        # Compute quality score
+        try:
+            quality = compute_quality_score(
+                stock_df=stock_df,
+                index_df=index_df,
+                features=features,
+                base_start_date=breakout.consolidation_start,
+                base_end_date=breakout.breakout_date,
+            )
+            features["quality_score"] = quality.total_score
+            features["technical_score"] = quality.technical_score
+            features["fundamental_score"] = quality.fundamental_score
+            features["market_score"] = quality.market_score
+            features["prior_uptrend_pct"] = quality.prior_uptrend_pct
+        except Exception as e:
+            logger.debug("Could not compute quality score: %s", e)
+            features["quality_score"] = 0.0
+            features["technical_score"] = 0.0
+            features["fundamental_score"] = 0.0
+            features["market_score"] = 0.0
+            features["prior_uptrend_pct"] = 0.0
+
         feature_rows.append(features)
 
     # Batch insert patterns
@@ -305,8 +336,11 @@ def _classify_and_save_batch(
             INSERT INTO detected_patterns
             (symbol, pattern_type, base_start_date, base_end_date,
              pivot_date, pivot_price, outcome, outcome_return_pct,
-             outcome_max_gain_pct, outcome_max_loss_pct, auto_label)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             outcome_max_gain_pct, outcome_max_loss_pct,
+             outcome_asym_20_7, outcome_asym_15_10, outcome_sym_10,
+             return_asym_20_7, return_asym_15_10, return_sym_10,
+             auto_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             pattern_rows,
         )
@@ -324,13 +358,14 @@ def _classify_and_save_batch(
                 """
                 INSERT OR REPLACE INTO pattern_features
                 (pattern_id, base_depth_pct, base_duration_weeks, base_symmetry,
-                 handle_depth_pct, tightness_score,
+                 handle_depth_pct, tightness_score, pre_breakout_tightness, pre_breakout_range_pct,
                  breakout_volume_ratio, volume_trend_in_base, up_down_volume_ratio,
-                 rs_line_slope_4wk, rs_line_slope_12wk, rs_new_high, rs_rank_percentile,
+                 rs_line_slope_4wk, rs_line_slope_12wk, rs_acceleration, rs_new_high, rs_rank_percentile,
                  eps_latest_yoy_growth, eps_acceleration, revenue_latest_yoy_growth,
                  institutional_pct, market_cap_log,
-                 sp500_above_200dma, sp500_trend_4wk, price_vs_50dma, price_vs_200dma)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 sp500_above_200dma, sp500_trend_4wk, price_vs_50dma, price_vs_200dma,
+                 quality_score, technical_score, fundamental_score, market_score, prior_uptrend_pct)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pattern_id,
@@ -339,11 +374,14 @@ def _classify_and_save_batch(
                     features.get("base_symmetry", 0.5),
                     features.get("handle_depth_pct", 0),
                     features.get("tightness_score", 0.5),
+                    features.get("pre_breakout_tightness", 1.0),
+                    features.get("pre_breakout_range_pct", 0.0),
                     features.get("breakout_volume_ratio", 1),
                     features.get("volume_trend_in_base", 0),
                     features.get("up_down_volume_ratio", 1),
                     features.get("rs_line_slope_4wk", 0),
                     features.get("rs_line_slope_12wk", 0),
+                    features.get("rs_acceleration", 0.0),
                     features.get("rs_new_high", False),
                     features.get("rs_rank_percentile", 50),
                     features.get("eps_latest_yoy_growth", 0),
@@ -355,15 +393,86 @@ def _classify_and_save_batch(
                     features.get("sp500_trend_4wk", 0),
                     features.get("price_vs_50dma", 0),
                     features.get("price_vs_200dma", 0),
+                    features.get("quality_score", 0),
+                    features.get("technical_score", 0),
+                    features.get("fundamental_score", 0),
+                    features.get("market_score", 0),
+                    features.get("prior_uptrend_pct", 0),
                 ),
             )
 
 
-def get_labeled_data() -> pd.DataFrame:
+def get_labeled_data(label_strategy: str = None) -> pd.DataFrame:
     """Load all labeled patterns with features for training.
+
+    Args:
+        label_strategy: Which outcome column to use for filtering.
+            Options: "asym_20_7", "asym_15_10", "sym_10"
+            If None, uses legacy 'outcome' column.
 
     Returns:
         DataFrame with pattern info and features.
+    """
+    # Map label strategy to outcome column
+    strategy_to_column = {
+        "asym_20_7": "outcome_asym_20_7",
+        "asym_15_10": "outcome_asym_15_10",
+        "sym_10": "outcome_sym_10",
+    }
+
+    # Determine which outcome column to filter on
+    if label_strategy and label_strategy in strategy_to_column:
+        outcome_col = strategy_to_column[label_strategy]
+    else:
+        outcome_col = "outcome"
+
+    conn = get_connection()
+    try:
+        # Check if new columns exist
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(detected_patterns)")
+        columns = {row[1] for row in cur.fetchall()}
+
+        # Fall back to legacy column if new columns don't exist
+        if outcome_col not in columns:
+            logger.warning(
+                "Column %s not found, falling back to 'outcome'. "
+                "Run 'python -m scanner.labeler --force' to populate new columns.",
+                outcome_col
+            )
+            outcome_col = "outcome"
+
+        df = pd.read_sql_query(
+            f"""
+            SELECT p.*, f.*
+            FROM detected_patterns p
+            LEFT JOIN pattern_features f ON p.id = f.pattern_id
+            WHERE p.{outcome_col} IN ('success', 'failure')
+            ORDER BY p.pivot_date
+            """,
+            conn,
+        )
+
+        # If using a specific strategy, add a normalized 'outcome' column for training
+        if label_strategy and label_strategy in strategy_to_column and outcome_col in df.columns:
+            df["outcome_for_training"] = df[outcome_col]
+        else:
+            df["outcome_for_training"] = df["outcome"]
+
+        return df
+    finally:
+        conn.close()
+
+
+def get_human_labeled_data() -> pd.DataFrame:
+    """Load only human-reviewed patterns for evaluation.
+
+    Returns patterns where a human has reviewed and labeled the outcome.
+    Used as a gold standard test set to evaluate model performance
+    and analyze disagreements between auto-labels and human judgment.
+
+    Returns:
+        DataFrame with pattern info and features for reviewed patterns.
     """
     conn = get_connection()
     try:
@@ -372,11 +481,13 @@ def get_labeled_data() -> pd.DataFrame:
             SELECT p.*, f.*
             FROM detected_patterns p
             LEFT JOIN pattern_features f ON p.id = f.pattern_id
-            WHERE p.outcome IN ('success', 'failure')
+            WHERE p.reviewed = 1
+              AND p.human_label IN ('success', 'failure')
             ORDER BY p.pivot_date
             """,
             conn,
         )
+        logger.info("Loaded %d human-labeled patterns", len(df))
         return df
     finally:
         conn.close()

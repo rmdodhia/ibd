@@ -65,10 +65,18 @@ CREATE TABLE IF NOT EXISTS detected_patterns (
     base_end_date DATE,
     pivot_date DATE,
     pivot_price REAL,
+    -- Legacy outcome column (for backward compatibility)
     outcome TEXT,
     outcome_return_pct REAL,
     outcome_max_gain_pct REAL,
     outcome_max_loss_pct REAL,
+    -- Multi-label outcomes (for experimentation)
+    outcome_asym_20_7 TEXT,      -- +20%/-7% (original IBD rules)
+    outcome_asym_15_10 TEXT,     -- +15%/-10% (less extreme)
+    outcome_sym_10 TEXT,         -- +10%/-10% (symmetric)
+    return_asym_20_7 REAL,       -- Return % for each strategy
+    return_asym_15_10 REAL,
+    return_sym_10 REAL,
     auto_label TEXT,
     human_label TEXT,
     reviewed BOOLEAN DEFAULT 0,
@@ -99,6 +107,12 @@ CREATE TABLE IF NOT EXISTS pattern_features (
     sp500_trend_4wk REAL,
     price_vs_50dma REAL,
     price_vs_200dma REAL,
+    -- Quality scores
+    quality_score REAL,
+    technical_score REAL,
+    fundamental_score REAL,
+    market_score REAL,
+    prior_uptrend_pct REAL,
     FOREIGN KEY (pattern_id) REFERENCES detected_patterns(id)
 );
 
@@ -196,5 +210,44 @@ def init_db() -> None:
     try:
         conn.executescript(SCHEMA_SQL)
         logger.info("Database initialized at %s", get_db_path())
+    finally:
+        conn.close()
+
+    # Run migrations for existing databases
+    migrate_db()
+
+
+def migrate_db() -> None:
+    """Add new columns to existing database tables.
+
+    This handles upgrading existing databases to new schema versions.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        # Check if multi-label columns exist in detected_patterns
+        cur.execute("PRAGMA table_info(detected_patterns)")
+        columns = {row[1] for row in cur.fetchall()}
+
+        # Add multi-label outcome columns if missing
+        new_columns = [
+            ("outcome_asym_20_7", "TEXT"),
+            ("outcome_asym_15_10", "TEXT"),
+            ("outcome_sym_10", "TEXT"),
+            ("return_asym_20_7", "REAL"),
+            ("return_asym_15_10", "REAL"),
+            ("return_sym_10", "REAL"),
+        ]
+
+        for col_name, col_type in new_columns:
+            if col_name not in columns:
+                try:
+                    cur.execute(f"ALTER TABLE detected_patterns ADD COLUMN {col_name} {col_type}")
+                    logger.info("Added column %s to detected_patterns", col_name)
+                except Exception as e:
+                    logger.debug("Column %s may already exist: %s", col_name, e)
+
+        conn.commit()
     finally:
         conn.close()

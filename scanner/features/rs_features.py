@@ -72,6 +72,20 @@ def extract_rs_features(
     else:
         rs_line_slope_12wk = 0.0
 
+    # RS acceleration (2nd derivative): is RS accelerating into breakout?
+    # Compare recent 2-week slope to prior 2-week slope
+    rs_recent = merged["rs_line"].tail(10).values  # Last 2 weeks
+    rs_prior = merged["rs_line"].tail(20).head(10).values  # Prior 2 weeks
+
+    if len(rs_recent) >= 5 and len(rs_prior) >= 5:
+        x = np.arange(len(rs_recent))
+        slope_recent = np.polyfit(x, rs_recent, 1)[0] if len(rs_recent) > 1 else 0
+        slope_prior = np.polyfit(x, rs_prior, 1)[0] if len(rs_prior) > 1 else 0
+        # Normalize to % per week
+        rs_acceleration = ((slope_recent - slope_prior) * 5 / rs_recent[0]) * 100 if rs_recent[0] > 0 else 0
+    else:
+        rs_acceleration = 0.0
+
     # RS at new high (within last 52 weeks)
     rs_52wk = merged["rs_line"].tail(252).values
     if len(rs_52wk) > 0:
@@ -87,6 +101,7 @@ def extract_rs_features(
     return {
         "rs_line_slope_4wk": float(rs_line_slope_4wk),
         "rs_line_slope_12wk": float(rs_line_slope_12wk),
+        "rs_acceleration": float(rs_acceleration),
         "rs_new_high": bool(rs_new_high),
         "rs_rank_percentile": float(rs_rank_percentile),
     }
@@ -97,6 +112,7 @@ def _empty_features() -> dict:
     return {
         "rs_line_slope_4wk": 0.0,
         "rs_line_slope_12wk": 0.0,
+        "rs_acceleration": 0.0,
         "rs_new_high": False,
         "rs_rank_percentile": 50.0,
     }

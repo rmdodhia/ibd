@@ -63,3 +63,6 @@ credentials.json
 
 # Archives
 *.zip
+
+# Screenshots
+*.png
