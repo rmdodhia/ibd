@@ -17,7 +17,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from scanner.config import get
+from scanner.config import get, get_price_range
 from scanner.db import get_cursor, get_connection
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class Breakout:
     prior_high: float
     prior_high_date: str
     # Legacy outcome (for backward compatibility)
-    outcome: Optional[str] = None  # 'success', 'failure', 'pending'
+    outcome: Optional[str] = None  # 'success', 'failure', or 'pending'
     outcome_return_pct: Optional[float] = None
     max_gain_pct: Optional[float] = None
     max_loss_pct: Optional[float] = None
@@ -118,8 +118,9 @@ def detect_breakouts(
             continue
 
         # Calculate price range during consolidation
-        high_in_cons = consolidation_df["high"].max()
-        low_in_cons = consolidation_df["low"].min()
+        cons_high, cons_low = get_price_range(consolidation_df)
+        high_in_cons = cons_high.max()
+        low_in_cons = cons_low.min()
         range_pct = ((high_in_cons - low_in_cons) / low_in_cons) * 100 if low_in_cons > 0 else 100
 
         if range_pct > max_consolidation_range_pct:
@@ -214,9 +215,12 @@ def _compute_outcome_for_thresholds(
     hit_target = False
     hit_stop = False
 
+    use_intraday = get("breakout.use_intraday_prices", True)
     for _, row in future_df.iterrows():
-        day_gain = ((row["high"] - breakout_price) / breakout_price) * 100
-        day_loss = ((breakout_price - row["low"]) / breakout_price) * 100
+        day_high = row["high"] if use_intraday else row["close"]
+        day_low = row["low"] if use_intraday else row["close"]
+        day_gain = ((day_high - breakout_price) / breakout_price) * 100
+        day_loss = ((breakout_price - day_low) / breakout_price) * 100
 
         if day_gain >= min_gain_pct and not hit_stop:
             hit_target = True
@@ -240,10 +244,8 @@ def _compute_outcome_for_thresholds(
 
         if final_return >= min_gain_pct * 0.5:
             return "success", float(final_return)
-        elif final_return <= -max_loss_pct * 0.5:
-            return "failure", float(final_return)
         else:
-            return "neutral", float(final_return)
+            return "failure", float(final_return)
 
 
 def label_breakout_outcomes(
@@ -321,8 +323,9 @@ def label_breakout_outcomes(
             continue
 
         # Calculate max gain/loss metrics (shared across all strategies)
-        max_high = future_df["high"].max()
-        min_low = future_df["low"].min()
+        future_high, future_low = get_price_range(future_df)
+        max_high = future_high.max()
+        min_low = future_low.min()
         b.max_gain_pct = float(((max_high - b.breakout_price) / b.breakout_price) * 100)
         b.max_loss_pct = float(((b.breakout_price - min_low) / b.breakout_price) * 100)
 

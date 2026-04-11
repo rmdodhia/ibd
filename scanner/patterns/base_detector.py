@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy.signal import argrelextrema
 
-from scanner.config import get
+from scanner.config import get, get_price_range
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +164,8 @@ class BaseDetector(ABC):
         if len(prior_region) < 10:
             return False, 0.0
 
-        prior_low = prior_region["low"].min()
+        _, prior_low_series = get_price_range(prior_region)
+        prior_low = prior_low_series.min()
         base_start_price = df.iloc[base_start_idx]["close"]
 
         if prior_low <= 0:

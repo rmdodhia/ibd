@@ -16,7 +16,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from scanner.config import get
+from scanner.config import get, get_price_range
 from scanner.patterns.base_detector import BaseDetector, DetectedPattern
 
 logger = logging.getLogger(__name__)
@@ -114,8 +114,9 @@ class FlatBaseDetector(BaseDetector):
                 break
 
             region = df.iloc[start_idx:end_idx]
-            high = region["high"].max()
-            low = region["low"].min()
+            region_high, region_low = get_price_range(region)
+            high = region_high.max()
+            low = region_low.min()
 
             if low <= 0:
                 continue

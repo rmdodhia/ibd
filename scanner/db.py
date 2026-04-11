@@ -80,6 +80,10 @@ CREATE TABLE IF NOT EXISTS detected_patterns (
     auto_label TEXT,
     human_label TEXT,
     reviewed BOOLEAN DEFAULT 0,
+    -- Pattern confidence and metadata
+    confidence REAL,             -- Detector confidence score (0-1)
+    metadata TEXT,               -- JSON-encoded pattern metadata
+    pattern_type_override TEXT,  -- User's correction of pattern type
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -238,6 +242,9 @@ def migrate_db() -> None:
             ("return_asym_20_7", "REAL"),
             ("return_asym_15_10", "REAL"),
             ("return_sym_10", "REAL"),
+            ("confidence", "REAL"),
+            ("metadata", "TEXT"),
+            ("pattern_type_override", "TEXT"),
         ]
 
         for col_name, col_type in new_columns:

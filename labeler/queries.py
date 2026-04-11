@@ -3,6 +3,7 @@
 Provides paginated pattern retrieval, filtering, and label updates.
 """
 
+import json
 import logging
 from typing import Optional
 
@@ -133,11 +134,12 @@ def get_pattern_with_features(pattern_id: int) -> Optional[dict]:
     """
     conn = get_connection()
     try:
-        # Check if multi-label columns exist
+        # Check which columns exist
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(detected_patterns)")
         columns = {row[1] for row in cur.fetchall()}
         has_multi_labels = "outcome_asym_20_7" in columns
+        has_confidence = "confidence" in columns
 
         query = """
             SELECT
@@ -170,6 +172,14 @@ def get_pattern_with_features(pattern_id: int) -> Optional[dict]:
                 NULL as return_asym_20_7,
                 NULL as return_asym_15_10,
                 NULL as return_sym_10,
+                """) + ("""
+                dp.confidence,
+                dp.metadata,
+                dp.pattern_type_override,
+                """ if has_confidence else """
+                NULL as confidence,
+                NULL as metadata,
+                NULL as pattern_type_override,
                 """) + """
                 pf.base_depth_pct,
                 pf.base_duration_weeks,
@@ -203,7 +213,16 @@ def get_pattern_with_features(pattern_id: int) -> Optional[dict]:
         if not row:
             return None
 
-        # Row indices (accounting for 6 new multi-label columns after index 14)
+        # Parse metadata JSON if present
+        metadata_raw = row[22]
+        metadata_parsed = None
+        if metadata_raw:
+            try:
+                metadata_parsed = json.loads(metadata_raw)
+            except (json.JSONDecodeError, TypeError):
+                metadata_parsed = None
+
+        # Row indices (accounting for multi-label + confidence columns)
         return {
             "id": row[0],
             "symbol": row[1],
@@ -227,28 +246,32 @@ def get_pattern_with_features(pattern_id: int) -> Optional[dict]:
             "return_asym_20_7": row[18],
             "return_asym_15_10": row[19],
             "return_sym_10": row[20],
+            # Confidence and metadata (indices 21-23)
+            "confidence": row[21],
+            "metadata": metadata_parsed,
+            "pattern_type_override": row[23],
             "features": {
-                "base_depth_pct": row[21],
-                "base_duration_weeks": row[22],
-                "base_symmetry": row[23],
-                "handle_depth_pct": row[24],
-                "tightness_score": row[25],
-                "breakout_volume_ratio": row[26],
-                "volume_trend_in_base": row[27],
-                "up_down_volume_ratio": row[28],
-                "rs_line_slope_4wk": row[29],
-                "rs_line_slope_12wk": row[30],
-                "rs_new_high": bool(row[31]) if row[31] is not None else None,
-                "rs_rank_percentile": row[32],
-                "eps_latest_yoy_growth": row[33],
-                "eps_acceleration": row[34],
-                "revenue_latest_yoy_growth": row[35],
-                "institutional_pct": row[36],
-                "market_cap_log": row[37],
-                "sp500_above_200dma": bool(row[38]) if row[38] is not None else None,
-                "sp500_trend_4wk": row[39],
-                "price_vs_50dma": row[40],
-                "price_vs_200dma": row[41],
+                "base_depth_pct": row[24],
+                "base_duration_weeks": row[25],
+                "base_symmetry": row[26],
+                "handle_depth_pct": row[27],
+                "tightness_score": row[28],
+                "breakout_volume_ratio": row[29],
+                "volume_trend_in_base": row[30],
+                "up_down_volume_ratio": row[31],
+                "rs_line_slope_4wk": row[32],
+                "rs_line_slope_12wk": row[33],
+                "rs_new_high": bool(row[34]) if row[34] is not None else None,
+                "rs_rank_percentile": row[35],
+                "eps_latest_yoy_growth": row[36],
+                "eps_acceleration": row[37],
+                "revenue_latest_yoy_growth": row[38],
+                "institutional_pct": row[39],
+                "market_cap_log": row[40],
+                "sp500_above_200dma": bool(row[41]) if row[41] is not None else None,
+                "sp500_trend_4wk": row[42],
+                "price_vs_50dma": row[43],
+                "price_vs_200dma": row[44],
             },
         }
 
@@ -284,6 +307,41 @@ def update_pattern_label(
             return cur.rowcount > 0
     except Exception as e:
         logger.error("Failed to update pattern %d: %s", pattern_id, e)
+        return False
+
+
+def update_pattern_type_override(
+    pattern_id: int,
+    pattern_type_override: Optional[str],
+) -> bool:
+    """Update pattern type override for a pattern.
+
+    This allows users to correct the auto-detected pattern type,
+    creating a gold standard dataset for measuring detector accuracy.
+
+    Args:
+        pattern_id: Pattern ID to update.
+        pattern_type_override: User's correction of pattern type.
+            Use None to clear the override (accept auto-detected type).
+            Valid values: "not_a_pattern", "cup_with_handle", "cup_without_handle",
+                         "double_bottom", "flat_base"
+
+    Returns:
+        True if update succeeded, False otherwise.
+    """
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                UPDATE detected_patterns
+                SET pattern_type_override = ?
+                WHERE id = ?
+                """,
+                (pattern_type_override, pattern_id),
+            )
+            return cur.rowcount > 0
+    except Exception as e:
+        logger.error("Failed to update pattern type override %d: %s", pattern_id, e)
         return False
 
 

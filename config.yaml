@@ -16,6 +16,8 @@ data:
 
 # ── Breakout Definition ───────────────────
 breakout:
+  # Price data mode: true = use intraday high/low, false = use close for all range calculations
+  use_intraday_prices: false
   # Label mode for legacy 'outcome' column: "asymmetric" or "symmetric"
   # Note: All 3 label variants are now computed regardless of this setting
   label_mode: "asymmetric"           # asymmetric for legacy compatibility

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from scanner.config import get
+from scanner.config import get, get_price_range
 from scanner.db import get_cursor, get_connection, init_db
 from scanner.data_pipeline import get_price_data
 
@@ -143,8 +143,9 @@ def _check_single_prediction(
     days_elapsed = (max_date - entry_date).days
 
     # Calculate max gain and max loss
-    max_high = future_df["high"].max()
-    min_low = future_df["low"].min()
+    future_high, future_low = get_price_range(future_df)
+    max_high = future_high.max()
+    min_low = future_low.min()
 
     max_gain = ((max_high - entry_price) / entry_price) * 100
     max_loss = ((entry_price - min_low) / entry_price) * 100
@@ -157,9 +158,12 @@ def _check_single_prediction(
     hit_target = False
     hit_stop = False
 
+    use_intraday = get("breakout.use_intraday_prices", True)
     for _, day in future_df.iterrows():
-        day_gain = ((day["high"] - entry_price) / entry_price) * 100
-        day_loss = ((entry_price - day["low"]) / entry_price) * 100
+        day_high = day["high"] if use_intraday else day["close"]
+        day_low = day["low"] if use_intraday else day["close"]
+        day_gain = ((day_high - entry_price) / entry_price) * 100
+        day_loss = ((entry_price - day_low) / entry_price) * 100
 
         if day_gain >= min_gain_pct and not hit_stop:
             hit_target = True

@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -292,6 +293,9 @@ def _classify_and_save_batch(
             breakout.return_asym_15_10,
             breakout.return_sym_10,
             "auto",
+            # Confidence and metadata
+            confidence,
+            json.dumps(metadata) if metadata else None,
         ))
 
         # Extract features
@@ -339,8 +343,8 @@ def _classify_and_save_batch(
              outcome_max_gain_pct, outcome_max_loss_pct,
              outcome_asym_20_7, outcome_asym_15_10, outcome_sym_10,
              return_asym_20_7, return_asym_15_10, return_sym_10,
-             auto_label)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             auto_label, confidence, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             pattern_rows,
         )

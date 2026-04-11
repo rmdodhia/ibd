@@ -7,6 +7,8 @@ handle_depth_pct, tightness_score, support_touches, resistance_touches.
 import numpy as np
 import pandas as pd
 
+from scanner.config import get_price_high_low_arrays
+
 
 def extract_pattern_features(
     df: pd.DataFrame,
@@ -34,8 +36,7 @@ def extract_pattern_features(
     if len(pattern_df) < 5:
         return _empty_features()
 
-    highs = pattern_df["high"].values
-    lows = pattern_df["low"].values
+    highs, lows = get_price_high_low_arrays(pattern_df)
     closes = pattern_df["close"].values
 
     # Base depth
@@ -75,13 +76,15 @@ def extract_pattern_features(
 
     if len(final_df) >= 5:
         # Calculate daily ranges in final period
-        final_ranges = final_df["high"].values - final_df["low"].values
+        final_highs, final_lows = get_price_high_low_arrays(final_df)
+        final_ranges = final_highs - final_lows
         final_range_avg = np.mean(final_ranges) if len(final_ranges) > 0 else 0
 
         # Calculate daily ranges in earlier period
         earlier_df = pattern_df.head(len(pattern_df) - final_weeks_days)
         if len(earlier_df) >= 5:
-            earlier_ranges = earlier_df["high"].values - earlier_df["low"].values
+            earlier_highs, earlier_lows = get_price_high_low_arrays(earlier_df)
+            earlier_ranges = earlier_highs - earlier_lows
             earlier_range_avg = np.mean(earlier_ranges) if len(earlier_ranges) > 0 else 0
 
             # Pre-breakout tightness ratio: lower = more contraction (better)

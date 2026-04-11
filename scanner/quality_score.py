@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from scanner.config import get
+from scanner.config import get, get_price_range
 
 logger = logging.getLogger(__name__)
 
@@ -326,8 +326,9 @@ def _check_prior_uptrend(
             return 0.0
 
         # Find the lowest point in the prior period
-        low_price = prior_period["low"].min()
-        low_idx = prior_period["low"].idxmin()
+        _, prior_low_series = get_price_range(prior_period)
+        low_price = prior_low_series.min()
+        low_idx = prior_low_series.idxmin()
 
         # Get data after the low
         after_low = prior_period.iloc[low_idx:]
@@ -335,7 +336,8 @@ def _check_prior_uptrend(
         if len(after_low) < 5:
             return 0.0
 
-        high_price = after_low["high"].max()
+        after_high_series, _ = get_price_range(after_low)
+        high_price = after_high_series.max()
 
         # Calculate gain from low to high
         if low_price > 0:

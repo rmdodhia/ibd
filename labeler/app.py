@@ -10,12 +10,21 @@ Usage:
     streamlit run labeler/app.py
 """
 
+import sys
+from pathlib import Path
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 import streamlit as st
 
 from labeler.queries import (
     get_patterns_paginated,
     get_pattern_with_features,
     update_pattern_label,
+    update_pattern_type_override,
     get_progress_stats,
     get_disagreement_stats,
     get_distinct_symbols,
@@ -23,6 +32,10 @@ from labeler.queries import (
     get_price_data_for_chart,
 )
 from labeler.components.chart import create_pattern_chart
+from scanner.patterns.explanations import (
+    generate_explanation_factors,
+    generate_narrative,
+)
 
 # Page config
 st.set_page_config(
@@ -264,6 +277,131 @@ def render_pattern_details(pattern: dict):
             st.write("Not computed - run labeler")
 
 
+def render_confidence_section(pattern: dict):
+    """Render pattern confidence display with explanation factors."""
+    confidence = pattern.get("confidence")
+    metadata = pattern.get("metadata")
+    pattern_type = pattern.get("pattern_type")
+
+    st.divider()
+    st.subheader("Pattern Confidence")
+
+    if confidence is None:
+        st.info(
+            "Confidence data not available for this pattern. "
+            "Re-run the labeler with `--force` to compute confidence scores."
+        )
+        return
+
+    # Confidence metric and progress bar
+    col1, col2 = st.columns([1, 3])
+
+    with col1:
+        confidence_pct = confidence * 100
+        if confidence_pct >= 75:
+            delta_color = "normal"
+        elif confidence_pct >= 60:
+            delta_color = "off"
+        else:
+            delta_color = "inverse"
+        st.metric(
+            "Confidence",
+            f"{confidence_pct:.0f}%",
+            delta=None,
+        )
+
+    with col2:
+        st.progress(confidence)
+
+    # Narrative summary
+    if metadata:
+        narrative = generate_narrative(pattern_type, confidence, metadata)
+        st.markdown(f"*{narrative}*")
+
+        # Contributing factors in expander
+        factors = generate_explanation_factors(pattern_type, metadata)
+        if factors:
+            with st.expander("Contributing Factors", expanded=False):
+                for factor in factors:
+                    # Color code based on whether factor was met
+                    if factor["met"]:
+                        icon = ":green[+]"
+                        bonus_str = f"+{factor['bonus']*100:.0f}%"
+                    else:
+                        icon = ":gray[-]"
+                        bonus_str = "+0%"
+
+                    st.markdown(
+                        f"{icon} **{factor['factor']}** ({factor['value']}): "
+                        f"{factor['description']} -> {bonus_str}"
+                    )
+    else:
+        st.caption("No metadata available for detailed explanation.")
+
+
+def render_pattern_type_override(pattern: dict):
+    """Render pattern type override controls."""
+    st.divider()
+    st.subheader("Pattern Type Verification")
+
+    current_type = pattern.get("pattern_type", "unknown")
+    current_override = pattern.get("pattern_type_override")
+
+    # Display current state
+    if current_override:
+        st.markdown(
+            f"**Detected:** {current_type} | "
+            f"**Override:** :orange[{current_override}]"
+        )
+    else:
+        st.markdown(f"**Detected:** {current_type} (no override)")
+
+    # Override options
+    override_options = [
+        ("Correct (accept auto-detected)", None),
+        ("Not a valid pattern", "not_a_pattern"),
+        ("Actually: cup_with_handle", "cup_with_handle"),
+        ("Actually: cup_without_handle", "cup_without_handle"),
+        ("Actually: double_bottom", "double_bottom"),
+        ("Actually: flat_base", "flat_base"),
+    ]
+
+    # Find current selection index
+    current_selection = 0
+    for i, (label, value) in enumerate(override_options):
+        if value == current_override:
+            current_selection = i
+            break
+
+    col1, col2 = st.columns([3, 1])
+
+    with col1:
+        selected_label = st.selectbox(
+            "Pattern Type Override",
+            options=[opt[0] for opt in override_options],
+            index=current_selection,
+            label_visibility="collapsed",
+        )
+
+    with col2:
+        # Find the value for selected label
+        selected_value = None
+        for label, value in override_options:
+            if label == selected_label:
+                selected_value = value
+                break
+
+        if st.button("Save Override", use_container_width=True):
+            if update_pattern_type_override(pattern["id"], selected_value):
+                if selected_value:
+                    st.success(f"Override set to '{selected_value}'")
+                else:
+                    st.success("Override cleared")
+                st.rerun()
+            else:
+                st.error("Failed to update override")
+
+
 def render_features(features: dict):
     """Render pattern features in an expandable section."""
     with st.expander("Pattern Features", expanded=False):
@@ -476,6 +614,12 @@ def main():
 
             # Pattern details
             render_pattern_details(pattern)
+
+            # Confidence and explanation
+            render_confidence_section(pattern)
+
+            # Pattern type override
+            render_pattern_type_override(pattern)
 
             # Features
             render_features(pattern["features"])

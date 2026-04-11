@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from scanner.config import get
+from scanner.config import get, get_price_range
 from scanner.db import init_db, get_cursor
 from scanner.universe import get_universe
 from scanner.data_pipeline import get_price_data, get_index_data
@@ -128,8 +128,11 @@ def _scan_symbol(
         return None
 
     current_price = recent["close"].iloc[-1]
-    recent_high = recent["high"].max()
-    high_50d = recent.tail(50)["high"].max()
+    recent_high_series, _ = get_price_range(recent)
+    recent_high = recent_high_series.max()
+    recent_50d = recent.tail(50)
+    high_50d_series, _ = get_price_range(recent_50d)
+    high_50d = high_50d_series.max()
 
     # Must be within 5% of 50-day high
     pct_from_high = ((recent_high - current_price) / recent_high) * 100

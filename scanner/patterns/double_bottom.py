@@ -16,7 +16,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from scanner.config import get
+from scanner.config import get, get_price_high_low_arrays
 from scanner.patterns.base_detector import BaseDetector, DetectedPattern
 
 logger = logging.getLogger(__name__)
@@ -96,8 +96,7 @@ class DoubleBottomDetector(BaseDetector):
             DetectedPattern if valid, None otherwise.
         """
         prices = df["close"].values
-        lows = df["low"].values
-        highs = df["high"].values
+        highs, lows = get_price_high_low_arrays(df)
 
         # Need prior peak for left lip
         if first_low_idx < 10:
